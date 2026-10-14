@@ -16,6 +16,7 @@ import argparse
 import collections
 import itertools
 import statistics as st
+import sys
 
 from ma_bench.release import Release, load_jsonl, parse_brief_id
 from ma_bench.score import brief_scores
@@ -96,12 +97,33 @@ def experts(R: Release) -> None:
   print(f"pairwise Cohen kappa: judge vs each expert mean {st.mean(jk):.3f}; expert vs expert mean {st.mean(ek):.3f}")
 
 
+def average_ranks(values: list[float]) -> list[float]:
+  """Ranks from 1, with tied values sharing their average rank."""
+  order = sorted(range(len(values)), key=lambda i: values[i])
+  ranks = [0.0] * len(values)
+  i = 0
+  while i < len(order):
+    j = i
+    while j + 1 < len(order) and values[order[j + 1]] == values[order[i]]:
+      j += 1
+    for k in range(i, j + 1):
+      ranks[order[k]] = (i + j) / 2 + 1
+    i = j + 1
+  return ranks
+
+
 def spearman(x: dict[str, float], y: dict[str, float]) -> float:
+  """Pearson correlation of average ranks, so ties count as ties; nan with fewer than three points or a constant side."""
   ks = sorted(x)
-  rx = {k: r for r, k in enumerate(sorted(ks, key=lambda k: x[k]))}
-  ry = {k: r for r, k in enumerate(sorted(ks, key=lambda k: y[k]))}
-  n = len(ks)
-  return 1 - 6 * sum((rx[k] - ry[k]) ** 2 for k in ks) / (n * (n * n - 1))
+  if len(ks) < 3:
+    return float("nan")
+  rx, ry = average_ranks([x[k] for k in ks]), average_ranks([y[k] for k in ks])
+  mx, my = st.mean(rx), st.mean(ry)
+  sxx = sum((a - mx) ** 2 for a in rx)
+  syy = sum((b - my) ** 2 for b in ry)
+  if sxx == 0 or syy == 0:
+    return float("nan")
+  return sum((a - mx) * (b - my) for a, b in zip(rx, ry)) / (sxx * syy) ** 0.5
 
 
 def judges(R: Release, judge_names: list[str] | None, condition: str) -> None:
@@ -115,7 +137,13 @@ def judges(R: Release, judge_names: list[str] | None, condition: str) -> None:
       by_judge[v["judge"]][v["brief_id"]] = v
       provider[v["judge"]] = v.get("judge_model", "").split("/")[0]
   names = judge_names or sorted(by_judge, key=lambda j: (-total[j], j))  # primary judge (most verdicts) first
+  missing = [j for j in names if j not in by_judge]
+  if missing or len(names) < 2:
+    sys.exit(f"need two or more judges with {condition} verdicts; available: {', '.join(sorted(by_judge)) or 'none'}"
+             + (f"; not found: {', '.join(missing)}" if missing else ""))
   common = set.intersection(*(set(by_judge[j]) for j in names))
+  if not common:
+    sys.exit(f"no {condition} briefs were graded by all of {', '.join(names)}")
   scen = sorted({by_judge[names[0]][b]["case_id"] for b in common}, key=lambda c: int(c[1:]))
   print(f"{len(common)} {condition} briefs graded by {', '.join(names)} (scenarios {', '.join(scen)})")
 

@@ -16,9 +16,11 @@ models and reproduces the published numbers from the released verdicts.
 ## Setup
 
 ```bash
-pip install -r requirements.txt        # or: pip install -e .
-huggingface-cli download ScaleAI/MA-Bench --repo-type dataset --local-dir MA-Bench
+pip install -r requirements.txt huggingface_hub   # or: pip install -e . huggingface_hub
+hf download ScaleAI/MA-Bench --repo-type dataset --local-dir MA-Bench
 ```
+
+The `hf` command ships with `huggingface_hub` 1.0 and later.
 
 Every command takes `--release MA-Bench`, the local copy of the dataset. Generation and grading check the release's
 `data/` and `scoring/` files against `MANIFEST.json` before the first call.

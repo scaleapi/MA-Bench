@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import sys
 import time
@@ -28,6 +29,9 @@ from ma_bench.release import Release, load_jsonl, sha256, slug, write_jsonl
 
 DEFAULT_JUDGE = "openai/gpt-5.6"
 TIMEOUT_S = 1800.0
+JUDGE_RETRIES = 8
+JUDGE_RETRY_WAIT_S = 45  # multiplied by the attempt number
+JUDGE_MAX_TOKENS = 49152  # for providers that count hidden thinking against max_tokens
 
 
 class JudgeFailure(BaseModel):
@@ -46,27 +50,33 @@ def judge_kwargs(judge: str, effort: str) -> dict:
   OpenAI reasoning models manage their own budget."""
   if judge.startswith("openai/") or judge.startswith("azure_ai/gpt"):
     return {"reasoning_effort": effort}
-  return {"reasoning_effort": effort, "max_tokens": 49152}
+  return {"reasoning_effort": effort, "max_tokens": JUDGE_MAX_TOKENS}
 
 
-async def grade_one(client, sem, JI, B, brief: dict, judge: str, effort: str, valid: set[str], cache: Path) -> dict:
+async def grade_one(client, sem, JI, B, brief: dict, judge: str, effort: str, valid: set[str], context: str, cache: Path) -> dict:
+  # A cached verdict is reused only for the same brief text, judge, effort and release files (context); anything
+  # else is graded again rather than passing an old verdict off as current.
+  fingerprint = hashlib.sha256(f"{context}|{brief['case_id']}|{brief['text']}".encode()).hexdigest()
   if cache.exists():
     try:
-      return json.loads(cache.read_text(encoding="utf-8"))
+      rec = json.loads(cache.read_text(encoding="utf-8"))
+      if rec.get("fingerprint") == fingerprint:
+        return rec
     except (json.JSONDecodeError, OSError):
-      cache.unlink()  # partial write from an interrupted run
+      pass  # partial write from an interrupted run
+    cache.unlink()
   system, user = JI.user_message(B, brief["case_id"], brief["text"])
   messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
   async with sem:
     t0 = time.time()
-    for attempt in range(8):
+    for attempt in range(JUDGE_RETRIES):
       try:
         resp = await client.chat.completions.parse(
           model=judge, messages=messages, response_format=JudgeResponse, **judge_kwargs(judge, effort)
         )
         break
       except Exception as exc:  # noqa: BLE001
-        wait = 45 * (attempt + 1)
+        wait = JUDGE_RETRY_WAIT_S * (attempt + 1)
         print(f"  retry {attempt + 1} {brief['brief_id']}: {type(exc).__name__}: {str(exc)[:100]} (sleep {wait}s)", flush=True)
         await asyncio.sleep(wait)
     else:
@@ -87,6 +97,7 @@ async def grade_one(client, sem, JI, B, brief: dict, judge: str, effort: str, va
     "served_model": resp.model,
     "system_fingerprint": getattr(resp, "system_fingerprint", None),
     "usage": resp.usage.model_dump() if resp.usage else None,
+    "fingerprint": fingerprint,
     "secs": round(time.time() - t0, 1),
   }
   cache.parent.mkdir(parents=True, exist_ok=True)
@@ -126,9 +137,10 @@ async def main_async(a) -> None:
     return
   client = AsyncOpenAI(timeout=TIMEOUT_S)
   sem = asyncio.Semaphore(a.concurrency)
+  context = f"{a.judge}|{a.effort}|{meta['judge_prompt_sha256']}|{meta['rubric_items_sha256']}"
   recs = await asyncio.gather(*[
     grade_one(
-      client, sem, JI, B, b, a.judge, a.effort, valid[b["case_id"]],
+      client, sem, JI, B, b, a.judge, a.effort, valid[b["case_id"]], context,
       out / "judge" / slug(a.judge) / (b["brief_id"].replace("/", "__") + ".json"),
     )
     for b in briefs

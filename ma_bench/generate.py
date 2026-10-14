@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import random
@@ -80,10 +81,17 @@ async def with_retries(factory, *, label: str, tries: int = 6, base: float = 20.
 
 async def generate_one(client, sem, R: Release, case_id: str, model: str, seed: int, a, cache: Path) -> dict:
   f = cache / f"gen__{case_id}__{slug(model)}__s{seed}.json"
-  if f.exists():
-    return json.loads(f.read_text(encoding="utf-8"))
-  messages = [{"role": "user", "content": R.model_input(case_id, a.word_cap)}]
+  prompt = R.model_input(case_id, a.word_cap)
   kwargs = request_kwargs(model, a)
+  # The cache is valid only for the same prompt and request settings; a rerun with a different cap, effort or
+  # release regenerates the brief instead of reusing one produced under other settings.
+  fingerprint = hashlib.sha256(json.dumps([prompt, model, kwargs, a.word_cap], sort_keys=True).encode()).hexdigest()
+  if f.exists():
+    rec = json.loads(f.read_text(encoding="utf-8"))
+    if rec.get("fingerprint") == fingerprint:
+      return rec
+    f.unlink()
+  messages = [{"role": "user", "content": prompt}]
 
   async def request():
     resp = await client.chat.completions.create(model=model, messages=messages, **kwargs)
@@ -114,6 +122,7 @@ async def generate_one(client, sem, R: Release, case_id: str, model: str, seed: 
     "finish_reason": resp.choices[0].finish_reason,
     "usage": resp.usage.model_dump() if getattr(resp, "usage", None) else None,
     "request": kwargs,
+    "fingerprint": fingerprint,
     "secs": round(time.time() - t0, 1),
   }
   tmp = f.with_suffix(".json.tmp")
@@ -160,6 +169,10 @@ async def main_async(a) -> None:
   }
   (out / "generate_meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
   print(f"wrote {out / 'briefs.jsonl'} ({len(done)} briefs, {len(recs) - len(done)} failed)", flush=True)
+  if len(done) < len(recs):
+    # The finished briefs are kept and cached, but a run with missing briefs must not pass as complete: scoring
+    # it would average over fewer scenarios or seeds than the protocol asks for. Rerun to fill the gaps.
+    sys.exit(f"{len(recs) - len(done)} briefs failed after retries; rerun the same command to generate them")
 
 
 def main() -> None:
