@@ -1,0 +1,25 @@
+# AUTO-GENERATED from entity.catalog.input.yaml by ./catalog/generate.sh. DO NOT EDIT.
+apiVersion: v3
+kind: repository
+metadata:
+  name: github.com/scaleapi/MA-Bench
+  displayName: MA-Bench
+  description: Source for MA-Bench Public Sector Benchmark.
+  owner: psml
+  tags:
+    - team:psml
+    - product:MA-Bench
+    - repo:scaleapi/MA-Bench
+    - catalog-version:0.0
+  links:
+    - name: MA-Bench GitHub Repository
+      type: repo
+      provider: github
+      url: https://github.com/scaleapi/MA-Bench
+    - name: psml GitHub owning team
+      type: other
+      provider: github
+      url: https://github.com/orgs/scaleapi/teams/psml
+spec:
+  lifecycle: development
+  tier: tier3

@@ -1,0 +1,8 @@
+# MA-Bench's Software Catalog entry. Edit this file, not the generated
+# entity.datadog.yaml, then run ./catalog/generate.sh and commit both.
+#
+# lifecycle defaults to development and tier to tier3. Set them, and add
+# links or tags, as the repository grows -- see catalog/schema.cue.
+repoName: MA-Bench
+owningTeam: psml
+description: "Source for MA-Bench Public Sector Benchmark."
