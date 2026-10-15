@@ -25,7 +25,7 @@ from pathlib import Path
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
-from ma_bench.release import Release, load_jsonl, sha256, slug, write_jsonl
+from ma_bench.release import Release, load_jsonl, parse_brief_id, sha256, slug, write_jsonl
 
 DEFAULT_JUDGE = "openai/gpt-5.6"
 TIMEOUT_S = 1800.0
@@ -53,10 +53,22 @@ def judge_kwargs(judge: str, effort: str) -> dict:
   return {"reasoning_effort": effort, "max_tokens": JUDGE_MAX_TOKENS}
 
 
-async def grade_one(client, sem, JI, B, brief: dict, judge: str, effort: str, valid: set[str], context: str, cache: Path) -> dict:
-  # A cached verdict is reused only for the same brief text, judge, effort and release files (context); anything
-  # else is graded again rather than passing an old verdict off as current.
-  fingerprint = hashlib.sha256(f"{context}|{brief['case_id']}|{brief['text']}".encode()).hexdigest()
+def cache_path(cache_dir: Path, brief_id: str) -> Path:
+  """Cache file for a brief, built only from the validated parts of its id and kept inside cache_dir."""
+  p = parse_brief_id(brief_id)  # raises on anything that is not <condition>/<scenario>__<model_slug>__s<seed>
+  path = (cache_dir / f"{p['condition']}__{p['scenario']}__{p['model_slug']}__s{p['seed']}.json").resolve()
+  if path.parent != cache_dir.resolve():
+    raise ValueError(f"cache path escapes {cache_dir}: {brief_id!r}")
+  return path
+
+
+async def grade_one(client, sem, JI, B, brief: dict, judge: str, effort: str, valid: set[str], cache: Path) -> dict:
+  system, user = JI.user_message(B, brief["case_id"], brief["text"])
+  messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+  kwargs = judge_kwargs(judge, effort)
+  # A cached verdict is reused only for the exact judge input (system prompt, case header, task, rubric and brief)
+  # and the same judge settings; anything else is graded again rather than passing an old verdict off as current.
+  fingerprint = hashlib.sha256(json.dumps([judge, kwargs, messages], sort_keys=True).encode()).hexdigest()
   if cache.exists():
     try:
       rec = json.loads(cache.read_text(encoding="utf-8"))
@@ -65,15 +77,11 @@ async def grade_one(client, sem, JI, B, brief: dict, judge: str, effort: str, va
     except (json.JSONDecodeError, OSError):
       pass  # partial write from an interrupted run
     cache.unlink()
-  system, user = JI.user_message(B, brief["case_id"], brief["text"])
-  messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
   async with sem:
     t0 = time.time()
     for attempt in range(JUDGE_RETRIES):
       try:
-        resp = await client.chat.completions.parse(
-          model=judge, messages=messages, response_format=JudgeResponse, **judge_kwargs(judge, effort)
-        )
+        resp = await client.chat.completions.parse(model=judge, messages=messages, response_format=JudgeResponse, **kwargs)
         break
       except Exception as exc:  # noqa: BLE001
         wait = JUDGE_RETRY_WAIT_S * (attempt + 1)
@@ -115,6 +123,16 @@ async def main_async(a) -> None:
   B = JI.load_bundle(R.root)
   valid = {c: set(items) for c, items in R.items_by_case().items()}
   briefs = load_jsonl(a.briefs)
+  bad = []
+  for b in briefs:  # fail before any judge call, not halfway through a run
+    try:
+      parse_brief_id(b["brief_id"])
+    except (KeyError, ValueError):
+      bad.append(str(b.get("brief_id")))
+    if b.get("case_id") not in valid:
+      bad.append(f"{b.get('brief_id')} (unknown case_id {b.get('case_id')!r})")
+  if bad:
+    sys.exit(f"{len(bad)} briefs have an invalid brief_id or case_id, e.g. {bad[:3]}")
   if a.conditions:
     briefs = [b for b in briefs if b["condition"] in a.conditions]
   if a.limit:
@@ -135,14 +153,12 @@ async def main_async(a) -> None:
   print(json.dumps(meta, indent=1), flush=True)
   if a.dry_run:
     return
+  cache_dir = out / "judge" / slug(a.judge)
+  cache_dir.mkdir(parents=True, exist_ok=True)
   client = AsyncOpenAI(timeout=TIMEOUT_S)
   sem = asyncio.Semaphore(a.concurrency)
-  context = f"{a.judge}|{a.effort}|{meta['judge_prompt_sha256']}|{meta['rubric_items_sha256']}"
   recs = await asyncio.gather(*[
-    grade_one(
-      client, sem, JI, B, b, a.judge, a.effort, valid[b["case_id"]], context,
-      out / "judge" / slug(a.judge) / (b["brief_id"].replace("/", "__") + ".json"),
-    )
+    grade_one(client, sem, JI, B, b, a.judge, a.effort, valid[b["case_id"]], cache_path(cache_dir, b["brief_id"]))
     for b in briefs
   ])
   path = out / f"verdicts_{slug(a.judge)}.jsonl"

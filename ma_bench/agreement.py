@@ -113,9 +113,9 @@ def average_ranks(values: list[float]) -> list[float]:
 
 
 def spearman(x: dict[str, float], y: dict[str, float]) -> float:
-  """Pearson correlation of average ranks, so ties count as ties; nan with fewer than three points or a constant side."""
+  """Pearson correlation of average ranks, so ties count as ties; nan with fewer than two points or a constant side."""
   ks = sorted(x)
-  if len(ks) < 3:
+  if len(ks) < 2:
     return float("nan")
   rx, ry = average_ranks([x[k] for k in ks]), average_ranks([y[k] for k in ks])
   mx, my = st.mean(rx), st.mean(ry)

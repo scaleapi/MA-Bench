@@ -95,8 +95,9 @@ def markdown(groups: list[dict]) -> str:
   ]
   for r in groups:
     w, u = r["weighted"], r["unweighted"]
+    model = r["model"] + (f" (partial, {r['n_scenarios']} scenarios)" if r.get("partial") else "")
     md.append(
-      f"| {r['condition']} | {r['model']} | {r['n_briefs']} | {w['mean']:.3f} ({w['ci95'][0]:.3f} to {w['ci95'][1]:.3f}) | "
+      f"| {r['condition']} | {model} | {r['n_briefs']} | {w['mean']:.3f} ({w['ci95'][0]:.3f} to {w['ci95'][1]:.3f}) | "
       f"{u['mean']:.1%} ({u['ci95'][0]:.1%} to {u['ci95'][1]:.1%}) | {r['positive_pass_rate']['mean']:.1%} | "
       f"{r['mistakes_per_brief']} ({r['critical_mistakes_per_brief']}) |"
     )
@@ -110,6 +111,8 @@ def main() -> None:
   ap.add_argument("--briefs", help="briefs JSONL for display names (default: the release's runs/briefs.jsonl)")
   ap.add_argument("--judge", help="keep only this judge's verdicts, e.g. gpt-5.6 (required if the file has several)")
   ap.add_argument("--conditions", nargs="*")
+  ap.add_argument("--allow-partial", action="store_true",
+                  help="score models that lack some scenarios (marked partial) instead of stopping")
   ap.add_argument("--md")
   ap.add_argument("--json")
   a = ap.parse_args()
@@ -126,6 +129,16 @@ def main() -> None:
   names = {b["model_slug"]: b["model"] for b in load_jsonl(briefs_path)} if briefs_path.exists() else {}
   rows = score_rows(R, verdicts)
   groups = group_scores(rows, names)
+  # A model's score is a mean over scenarios, so a model missing scenarios is scored on a different benchmark.
+  # Stop by default; with --allow-partial, score it and mark it.
+  n_all = len(R.cases)
+  partial = [g for g in groups if g["n_scenarios"] < n_all]
+  for g in partial:
+    g["partial"] = True
+  if partial and not a.allow_partial:
+    ap.exit(1, "models missing scenarios (scores would not be comparable): "
+            + "; ".join(f"{g['condition']} {g['model']} {g['n_scenarios']}/{n_all}" for g in partial)
+            + "\nrerun generation and grading to fill the gaps, or pass --allow-partial\n")
   text = markdown(groups)
   print(text)
   if a.md:
