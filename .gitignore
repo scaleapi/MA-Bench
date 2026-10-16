@@ -35,3 +35,13 @@ dump.rdb
 
 # Temp dirs
 tmp
+
+# MA-Bench: local copy of the dataset and run outputs
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+dist/
+build/
+MA-Bench/
+runs/
